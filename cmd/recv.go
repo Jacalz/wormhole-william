@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/cheggaaa/pb/v3"
-	"github.com/klauspost/compress/zip"
 	"github.com/psanford/wormhole-william/wormhole"
 	"github.com/spf13/cobra"
 )
@@ -168,12 +167,12 @@ func recvAction(cmd *cobra.Command, args []string) {
 				msg.Reject()
 				bail("transfer rejected")
 			} else {
-				err = os.Mkdir(msg.Name, 0777)
+				err = os.Mkdir(msg.Name, 0750)
 				if err != nil {
 					bail("Mkdir error for %s: %s\n", msg.Name, err)
 				}
 
-				tmpFile, err := ioutil.TempFile(wd, fmt.Sprintf("%s.zip.tmp", msg.Name))
+				tmpFile, err := ioutil.TempFile(wd, msg.Name+".zip.tmp")
 				if err != nil {
 					bail("Failed to create tempfile: %s", err)
 				}
@@ -190,52 +189,13 @@ func recvAction(cmd *cobra.Command, args []string) {
 				}
 
 				tmpFile.Seek(0, io.SeekStart)
-				zr, err := zip.NewReader(tmpFile, int64(n))
+
+				err = extract(tmpFile, n, dirName)
 				if err != nil {
-					bail("Read zip error: %s", err)
-				}
-
-				for _, zf := range zr.File {
-					p, err := filepath.Abs(filepath.Join(dirName, zf.Name))
-					if err != nil {
-						bail("Failes to calculate file path ABS: %s", err)
-					}
-
-					if !strings.HasPrefix(p, dirName) {
-						bail("Dangerous filename detected: %s", zf.Name)
-					}
-
-					rc, err := zf.Open()
-					if err != nil {
-						bail("Failed to open file in zip: %s %s", zf.Name, err)
-					}
-
-					dir := filepath.Dir(p)
-					err = os.MkdirAll(dir, 0777)
-					if err != nil {
-						bail("Failed to mkdirall %s: %s", dir, err)
-					}
-
-					f, err := os.Create(p)
-					if err != nil {
-						bail("Failed to open %s: %s", p, err)
-					}
-
-					_, err = io.Copy(f, rc)
-					if err != nil {
-						bail("Failed to write to %s: %s", p, err)
-					}
-
-					err = f.Close()
-					if err != nil {
-						bail("Error closing %s: %s", p, err)
-					}
-
-					rc.Close()
+					bail("Error extracting directory: %s", err)
 				}
 
 				proxyReader.Close()
-
 			}
 		}
 	}
