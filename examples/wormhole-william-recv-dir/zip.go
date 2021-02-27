@@ -7,10 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/klauspost/compress/zip"
+	"archive/zip"
 )
 
-func extract(source io.ReaderAt, length int64, target string) error {
+var errorDangerousFilename = errors.New("dangerous filename detected")
+
+// Extract takes a reader and the length and then extracts it to the target.
+func Extract(source io.ReaderAt, length int64, target string) error {
 	reader, err := zip.NewReader(source, length)
 	if err != nil {
 		return err
@@ -32,7 +35,7 @@ func extractFile(file *zip.File, target string) (err error) {
 	}
 
 	if !strings.HasPrefix(path, target) {
-		return errors.New("dangerous filename detected: " + path)
+		return errorDangerousFilename
 	}
 
 	fileReader, err := file.Open()
@@ -46,12 +49,16 @@ func extractFile(file *zip.File, target string) (err error) {
 		}
 	}()
 
-	err = os.MkdirAll(filepath.Dir(path), 0750)
-	if err != nil {
-		return err
+	if file.FileInfo().IsDir() {
+		err = os.MkdirAll(path, 0750)
+		if err != nil {
+			return err
+		}
+
+		return nil
 	}
 
-	targetFile, err := os.Create(path)
+	targetFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.Mode())
 	if err != nil {
 		return err
 	}
