@@ -12,7 +12,7 @@ import (
 
 var errorDangerousFilename = errors.New("dangerous filename detected")
 
-// Extract takes a reader and the length and then extracts it to the target.
+// extract takes a reader and the length and then extracts it to the target.
 func extract(source io.ReaderAt, length int64, target string) error {
 	reader, err := zip.NewReader(source, length)
 	if err != nil {
@@ -50,12 +50,16 @@ func extractFile(file *zip.File, target string) (err error) {
 	}()
 
 	if file.FileInfo().IsDir() {
-		err = os.MkdirAll(path, 0750)
+		err = os.MkdirAll(path, 0777)
 		if err != nil {
 			return err
 		}
 
 		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0777); err != nil {
+		return err
 	}
 
 	targetFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.Mode())
