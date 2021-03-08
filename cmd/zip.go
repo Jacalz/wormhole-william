@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"archive/zip"
+	"github.com/klauspost/compress/zip"
 )
 
 var errorDangerousFilename = errors.New("dangerous filename detected")
