@@ -365,8 +365,7 @@ func (c *Client) sendFileDirectory(ctx context.Context, offer *offerMsg, r io.Re
 		recordSlice := make([]byte, recordSize-secretbox.Overhead)
 		hasher := sha256.New()
 
-		var progress int64
-		var totalSize int64
+		var progress, totalSize int64
 		if offer.File != nil {
 			totalSize = offer.File.FileSize
 		} else if offer.Directory != nil {
@@ -383,7 +382,7 @@ func (c *Client) sendFileDirectory(ctx context.Context, offer *offerMsg, r io.Re
 					return
 				}
 				progress = progress + int64(n)
-				if options.progressFunc != nil {
+				if options.progressFunc != nil && totalSize != int64(-1) {
 					options.progressFunc(progress, totalSize)
 				}
 			}
@@ -413,6 +412,13 @@ func (c *Client) sendFileDirectory(ctx context.Context, offer *offerMsg, r io.Re
 			return
 		}
 
+		// If called WithProgress and with a reader that does not conform
+		// to io.ReadSeeker, send a single progress update
+		// showing that the transfer is complete.
+		if options.progressFunc != nil && totalSize != int64(-1) {
+			options.progressFunc(progress, progress)
+		}
+
 		shaSum := fmt.Sprintf("%x", hasher.Sum(nil))
 		if strings.ToLower(ack.SHA256) != shaSum {
 			sendErr(fmt.Errorf("receiver sha256 mismatch %s vs %s", ack.SHA256, shaSum))
@@ -428,15 +434,15 @@ func (c *Client) sendFileDirectory(ctx context.Context, offer *offerMsg, r io.Re
 	return pwStr, ch, nil
 }
 
-// SendFile sends a single file via the wormhole protocol. It returns a nameplate+passhrase code to give to the
-// receiver, a result channel that will be written to after the receiver attempts to read (either successfully or not)
-// and an error if one occurred.
-func (c *Client) SendFile(ctx context.Context, fileName string, r io.ReadSeeker, opts ...SendOption) (string, chan SendResult, error) {
+// SendFile sends a single file via the wormhole protocol. It returns a nameplate+passhrase code to give to the receiver,
+// a result channel that will be written to after the receiver attempts to read (either successfully or not) and an error if one occurred.
+// NOTE: The reader needs to be an io.ReadSeeker for fully working progress bars when passing the WithProgress option.
+func (c *Client) SendFile(ctx context.Context, fileName string, r io.Reader, opts ...SendOption) (string, chan SendResult, error) {
 	if err := c.validateRelayAddr(); err != nil {
 		return "", nil, fmt.Errorf("invalid TransitRelayAddress: %s", err)
 	}
 
-	size, err := readSeekerSize(r)
+	size, err := seekSize(r)
 	if err != nil {
 		return "", nil, err
 	}
@@ -524,8 +530,7 @@ func makeTmpZip(directoryName string, entries []DirectoryEntry) (*zipResult, err
 		return nil, errors.New("directoryName must be set")
 	}
 
-	prefix, _ := filepath.Split(directoryName)
-	if prefix != "" {
+	if prefix, _ := filepath.Split(directoryName); prefix != "" {
 		return nil, errors.New("directoryName must not include sub directories")
 	}
 
@@ -533,9 +538,10 @@ func makeTmpZip(directoryName string, entries []DirectoryEntry) (*zipResult, err
 
 	var totalBytes int64
 
+	prefixPath := filepath.ToSlash(directoryName) + "/"
+
 	for _, entry := range entries {
 		entryPath := filepath.ToSlash(entry.Path)
-		prefixPath := filepath.ToSlash(directoryName) + "/"
 
 		if !strings.HasPrefix(entryPath, prefixPath) {
 			return nil, errors.New("each directory entry must be prefixed with the directoryName")
@@ -545,24 +551,25 @@ func makeTmpZip(directoryName string, entries []DirectoryEntry) (*zipResult, err
 			Name:   strings.TrimPrefix(entryPath, prefixPath),
 			Method: zip.Deflate,
 		}
+
 		header.SetMode(entry.Mode)
+
 		f, err := w.CreateHeader(header)
 		if err != nil {
 			return nil, err
 		}
+
 		r, err := entry.Reader()
 		if err != nil {
 			return nil, err
 		}
 
-		var counter countWriter
-
-		_, err = io.Copy(f, io.TeeReader(r, &counter))
+		n, err := io.Copy(f, r)
 		if err != nil {
 			return nil, err
 		}
 
-		totalBytes = totalBytes + counter.count
+		totalBytes += n
 
 		err = r.Close()
 		if err != nil {
@@ -575,10 +582,11 @@ func makeTmpZip(directoryName string, entries []DirectoryEntry) (*zipResult, err
 		return nil, err
 	}
 
-	zipSize, err := readSeekerSize(f)
+	zipSize, err := seekSize(f)
 	if err != nil {
 		return nil, err
 	}
+
 	result := zipResult{
 		file:     f,
 		numBytes: totalBytes,
@@ -589,50 +597,24 @@ func makeTmpZip(directoryName string, entries []DirectoryEntry) (*zipResult, err
 	return &result, nil
 }
 
-type countWriter struct {
-	count int64
-}
+func seekSize(r io.Reader) (int64, error) {
+	s, ok := r.(io.Seeker)
+	if !ok {
+		return -1, nil
+	}
 
-func (c *countWriter) Write(p []byte) (int, error) {
-	c.count = c.count + int64(len(p))
-	return len(p), nil
-}
-
-func readSeekerSize(r io.ReadSeeker) (int64, error) {
-	size, err := r.Seek(0, io.SeekEnd)
+	size, err := s.Seek(0, io.SeekEnd)
 	if err != nil {
 		return -1, err
 	}
 
-	_, err = r.Seek(0, io.SeekStart)
+	_, err = s.Seek(0, io.SeekStart)
 	if err != nil {
 		return -1, err
 	}
 
 	return size, nil
 
-}
-
-type sendOptions struct {
-	code         string
-	progressFunc progressFunc
-}
-
-type SendOption interface {
-	setOption(*sendOptions) error
-}
-
-type sendCodeOption struct {
-	code string
-}
-
-func (o sendCodeOption) setOption(opts *sendOptions) error {
-	if err := validateCode(o.code); err != nil {
-		return err
-	}
-
-	opts.code = o.code
-	return nil
 }
 
 func validateCode(code string) error {
@@ -647,33 +629,4 @@ func validateCode(code string) error {
 		return errors.New("code must not contain spaces")
 	}
 	return nil
-}
-
-// WithCode returns a SendOption to use a specific nameplate+code
-// instead of generating one dynamically.
-func WithCode(code string) SendOption {
-	return sendCodeOption{code: code}
-}
-
-type progressFunc func(sentBytes int64, totalBytes int64)
-
-type progressSendOption struct {
-	progressFunc progressFunc
-}
-
-func (o progressSendOption) setOption(opts *sendOptions) error {
-	opts.progressFunc = o.progressFunc
-	return nil
-}
-
-// WithProgress returns a SendOption to track the progress of the data
-// transfer. It takes a callback function that will be called for each
-// chunk of data successfully written.
-//
-// WithProgress is only minimally supported in SendText. SendText does
-// not use the wormhole transit protocol so it is not able to detect
-// the progress of the receiver. This limitation does not apply to
-// SendFile or SendDirectory.
-func WithProgress(f func(sentBytes int64, totalBytes int64)) SendOption {
-	return progressSendOption{f}
 }
