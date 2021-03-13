@@ -381,8 +381,8 @@ func (c *Client) sendFileDirectory(ctx context.Context, offer *offerMsg, r io.Re
 					sendErr(err)
 					return
 				}
-				progress = progress + int64(n)
-				if options.progressFunc != nil && totalSize != int64(-1) {
+				progress += int64(n)
+				if options.progressFunc != nil {
 					options.progressFunc(progress, totalSize)
 				}
 			}
@@ -412,13 +412,6 @@ func (c *Client) sendFileDirectory(ctx context.Context, offer *offerMsg, r io.Re
 			return
 		}
 
-		// If called WithProgress and with a reader that does not conform
-		// to io.ReadSeeker, send a single progress update
-		// showing that the transfer is complete.
-		if options.progressFunc != nil && totalSize != int64(-1) {
-			options.progressFunc(progress, progress)
-		}
-
 		shaSum := fmt.Sprintf("%x", hasher.Sum(nil))
 		if strings.ToLower(ack.SHA256) != shaSum {
 			sendErr(fmt.Errorf("receiver sha256 mismatch %s vs %s", ack.SHA256, shaSum))
@@ -436,13 +429,12 @@ func (c *Client) sendFileDirectory(ctx context.Context, offer *offerMsg, r io.Re
 
 // SendFile sends a single file via the wormhole protocol. It returns a nameplate+passhrase code to give to the receiver,
 // a result channel that will be written to after the receiver attempts to read (either successfully or not) and an error if one occurred.
-// NOTE: The reader needs to be an io.ReadSeeker for fully working progress bars when passing the WithProgress option.
-func (c *Client) SendFile(ctx context.Context, fileName string, r io.Reader, opts ...SendOption) (string, chan SendResult, error) {
+func (c *Client) SendFile(ctx context.Context, fileName string, r io.ReadSeeker, opts ...SendOption) (string, chan SendResult, error) {
 	if err := c.validateRelayAddr(); err != nil {
 		return "", nil, fmt.Errorf("invalid TransitRelayAddress: %s", err)
 	}
 
-	size, err := seekSize(r)
+	size, err := readSeekerSize(r)
 	if err != nil {
 		return "", nil, err
 	}
@@ -582,7 +574,7 @@ func makeTmpZip(directoryName string, entries []DirectoryEntry) (*zipResult, err
 		return nil, err
 	}
 
-	zipSize, err := seekSize(f)
+	zipSize, err := readSeekerSize(f)
 	if err != nil {
 		return nil, err
 	}
@@ -597,18 +589,13 @@ func makeTmpZip(directoryName string, entries []DirectoryEntry) (*zipResult, err
 	return &result, nil
 }
 
-func seekSize(r io.Reader) (int64, error) {
-	s, ok := r.(io.Seeker)
-	if !ok {
-		return -1, nil
-	}
-
-	size, err := s.Seek(0, io.SeekEnd)
+func readSeekerSize(r io.ReadSeeker) (int64, error) {
+	size, err := r.Seek(0, io.SeekEnd)
 	if err != nil {
 		return -1, err
 	}
 
-	_, err = s.Seek(0, io.SeekStart)
+	_, err = r.Seek(0, io.SeekStart)
 	if err != nil {
 		return -1, err
 	}
